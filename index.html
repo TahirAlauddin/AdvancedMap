@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Leaflet Dropzone Integration</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+  <link rel="stylesheet" href="https://unpkg.com/@geoman-io/leaflet-geoman-free/dist/leaflet-geoman.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/dropzone/5.9.3/dropzone.min.css" />
+  <style>
+    body {
+      margin: 0;
+      height: 100vh;
+    }
+
+    #map {
+      height: 95vh;
+    }
+
+    .dz-message {
+      display: none;
+    }
+
+    .dropzone {
+      border: none;
+      border-radius: 5px;
+      padding: 0;
+      background: rgba(255, 255, 255, 0.1);
+      overflow: auto;
+    }
+
+    .dropzone::-webkit-scrollbar {
+      width: 0;
+      /* Remove scrollbar width */
+      height: 0;
+      /* Remove scrollbar height */
+    }
+
+    /* For Firefox */
+    .dropzone {
+      scrollbar-width: none;
+      /* Hide scrollbar */
+    }
+
+    /* For Internet Explorer and Edge */
+    .dropzone {
+      -ms-overflow-style: none;
+      /* Hide scrollbar */
+    }
+
+    .search-container {
+      margin-top: 5px;
+      width: 100%;
+    }
+
+    #locationInput {
+      width: 85%;
+    }
+
+    #searchButton {
+      width: auto;
+    }
+
+    ul {
+      font-size: 18px;
+    }
+
+    li {
+      font-size: 14px;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="map"></div>
+  <div class="search-container">
+    <input type="text" id="locationInput" placeholder="Enter location name" />
+    <button id="searchButton">Search</button>
+  </div>
+  <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/@geoman-io/leaflet-geoman-free/dist/leaflet-geoman.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dropzone/5.9.3/min/dropzone.min.js"></script>
+  <script>
+    const { ipcRenderer } = require("electron");
+
+    let outerPath = "";
+    let destinationPath = "";
+    let lastDropzone, lastLayer;
+
+    document.addEventListener('keydown', function (event) {
+      if (outerPath !== "") {
+        // Check if the 'Control' key is pressed and the 'z' key is pressed
+        if (event.ctrlKey && event.key === 'z') {
+          // Prevent the default action (usually Undo)
+          event.preventDefault();
+
+          // Call your function here
+          ipcRenderer.send("moveReversed", outerPath, destinationPath);
+
+          outerPath = "";
+
+          if (lastDropzone) {
+            lastDropzone.remove()
+            lastDropzone = null;
+          }
+
+          // Remove lastLayer if it exists
+          if (lastLayer) {
+            map.removeLayer(lastLayer);
+            lastLayer = null;
+          }
+        }
+      }
+    });
+
+    function getOuterFolderPath(fullPath, path) {
+      // Split fullPath by "/" to get the hierarchy of folders and file
+      const fullPathParts = fullPath.split("/");
+
+      // Remove the last part (the file name)
+      fullPathParts.pop();
+
+      // Get the outer folder name from the remaining parts
+      const outerFolderName = fullPathParts[0];
+
+      // Find the index of the outer folder name in the path
+      const outerFolderIndex = path.indexOf(outerFolderName);
+
+      // Extract the outer folder path from the path
+      const outerFolderPath = path.substring(
+        0,
+        outerFolderIndex + outerFolderName.length
+      );
+
+      return outerFolderPath;
+    }
+
+
+    var map = L.map("map").setView([45.3267976, 14.442208], 13);
+
+    var openStreetMapLayer = L.tileLayer(
+      "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+      {
+        maxZoom: 19,
+      }
+    ).addTo(map);
+
+    var googleSatLayer = L.tileLayer(
+      "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
+      {
+        maxZoom: 20,
+      }
+    );
+
+    var layers = {
+      OpenStreetMap: openStreetMapLayer,
+      "Google Satellite": googleSatLayer,
+    };
+
+    var currentLayer = openStreetMapLayer;
+
+    map.pm.addControls({
+      position: "topleft",
+      drawMarker: false,
+      drawCircleMarker: false,
+      drawPolyline: false,
+      drawPolygon: false,
+      drawCircle: false,
+      drawRectangle: true,
+      editMode: true,
+      dragMode: true,
+      cutPolygon: true,
+      removalMode: true,
+      rotateMode: true,
+      customControls: true,
+    });
+
+    var bounds;
+    var dropzones = {};
+
+    var drawnItems = new L.FeatureGroup();
+    map.addLayer(drawnItems);
+
+    map.on("pm:create", function (e) {
+      if (e.shape === "Rectangle") {
+        var layer = e.layer;
+        drawnItems.addLayer(layer);
+        addDropzoneForLayer(layer);
+      }
+    });
+
+    function addRotationHandler(layer) {
+      layer.pm.enableRotateMode();
+    }
+
+    drawnItems.eachLayer(function (layer) {
+      if (layer instanceof L.Rectangle) {
+        addResizeHandler(layer);
+        addRotationHandler(layer);
+      }
+    });
+
+    var layerButton = L.DomUtil.create(
+      "button",
+      "pm-button",
+      document.querySelector(".leaflet-pm-toolbar")
+    );
+    layerButton.style.display = "block";
+    layerButton.innerHTML =
+      '<img style="width: 15px" src="Layer.png" />';
+    layerButton.title = "Switch Layer";
+
+    layerButton.addEventListener("click", function () {
+      map.removeLayer(currentLayer);
+      if (currentLayer === openStreetMapLayer) {
+        currentLayer = googleSatLayer;
+      } else {
+        currentLayer = openStreetMapLayer;
+      }
+      map.addLayer(currentLayer);
+    });
+
+    var splitMode = false;
+    var splitButton = L.DomUtil.create(
+      "button",
+      "pm-button",
+      document.querySelector(".leaflet-pm-toolbar")
+    );
+    splitButton.innerHTML =
+      '<img src="razor.svg" />';
+    splitButton.title = "Split Rectangle";
+
+    splitButton.addEventListener("click", function () {
+      splitMode = !splitMode;
+      if (splitMode) {
+        splitButton.classList.add("active");
+      } else {
+        splitButton.classList.remove("active");
+      }
+    });
+
+    map.on("click", function (e) {
+      if (splitMode) {
+        var latlng = e.latlng;
+        drawnItems.eachLayer(function (layer) {
+          if (
+            layer instanceof L.Rectangle &&
+            layer.getBounds().contains(latlng)
+          ) {
+            var bounds = layer.getBounds();
+            var ne = bounds.getNorthEast();
+            var sw = bounds.getSouthWest();
+            var center = bounds.getCenter();
+
+            var rect1 = L.rectangle(
+              [
+                [sw.lat, center.lng],
+                [ne.lat, ne.lng],
+              ],
+              { color: "red" }
+            );
+            var rect2 = L.rectangle(
+              [
+                [sw.lat, sw.lng],
+                [ne.lat, center.lng],
+              ],
+              { color: "blue" }
+            );
+
+            drawnItems.addLayer(rect1);
+            drawnItems.addLayer(rect2);
+            drawnItems.removeLayer(layer);
+
+            // Remove the existing dropzone
+            map
+              .getPanes()
+              .overlayPane.removeChild(dropzones[layer._leaflet_id]);
+            delete dropzones[layer._leaflet_id];
+
+            // Add new dropzones for the split rectangles
+            addDropzoneForLayer(rect1);
+            addDropzoneForLayer(rect2);
+          }
+        });
+      }
+    });
+
+    function addDropzoneForLayer(layer) {
+      var dropzoneDiv;
+      // Convert the rectangle bounds to a div
+      var bounds = layer.getBounds();
+      var nw = map.latLngToLayerPoint(bounds.getNorthWest());
+      var se = map.latLngToLayerPoint(bounds.getSouthEast());
+
+      dropzoneDiv = L.DomUtil.create("div", "dropzone");
+      dropzoneDiv.style.position = "absolute";
+      dropzoneDiv.style.left = nw.x + "px";
+      dropzoneDiv.style.top = nw.y + "px";
+      dropzoneDiv.style.width = se.x - nw.x + "px";
+      dropzoneDiv.style.height = se.y - nw.y + "px";
+      dropzoneDiv.style.zIndex = "200";
+
+      // Assign a unique ID to the dropzoneDiv
+      dropzoneDiv.id = "dropzone-" + Date.now();
+
+      map.getPanes().overlayPane.appendChild(dropzoneDiv);
+
+      var fileListContainer = L.DomUtil.create(
+        "div",
+        "file-list-container",
+        dropzoneDiv
+      );
+      var fileList = L.DomUtil.create("ul", "file-list", fileListContainer);
+
+      var myDropzone = new Dropzone(dropzoneDiv, {
+        url: "#", // No URL needed
+        clickable: false,
+        autoProcessQueue: true, // Prevent auto upload
+        maxFiles: null, // Allow multiple files
+        uploadMultiple: true,
+        init: function () {
+          var topLevelFolders = new Set();
+
+          this.on("drop", async function (event) {
+            // Ensure only one dialog is opened per drop event
+            if (event.dataTransfer.items.length > 0 && event.dataTransfer.items[0].webkitGetAsEntry().isDirectory) {
+              destinationPath = await ipcRenderer.invoke('select-destination-folder');
+
+              if (destinationPath) {
+                console.log('Selected destination path:', destinationPath);
+                ipcRenderer.send("folderDropped", outerPath, destinationPath);
+
+                // You can pass the path to the main process or handle it within the renderer
+              } else {
+                console.log('No destination folder selected.');
+              }
+            }
+
+            // Clear all files in Dropzone to prevent re-triggering
+            this.removeAllFiles();
+          });
+
+          this.on("addedfile", async function (file) {
+            console.log(file);
+            if (file.fullPath == null) {
+              this.removeFile(file);
+              return;
+            }
+
+            // Check file extension
+            var validExtensions = ['png', 'jpg', 'jpeg'];
+            var fileExtension = file.name.split('.').pop().toLowerCase();
+            if (!validExtensions.includes(fileExtension)) {
+              this.removeFile(file);
+              return;
+            }
+
+            outerPath = getOuterFolderPath(file.fullPath, file.path);
+
+
+            var fullPath = file.fullPath.split("/");
+            dropzoneDiv.style.background = "rgba(255, 255, 255, 0.6)";
+            dropzoneDiv.style.border = "2px dashed #0087f7";
+
+            lastDropzone = dropzoneDiv;
+            lastLayer = layer;
+
+
+            // Check if the file is in the root directory (i.e., not in a subdirectory)
+            if (fullPath.length > 2) {
+              var folderName = fullPath[0];
+              var fileName = fullPath[1];
+
+              if (topLevelFolders.has(fileName)) {
+                this.removeFile(file);
+                return;
+              }
+
+              topLevelFolders.add(fileName);
+
+              // Check if folder already exists in the list
+              var folderListItem = document.getElementById(folderName + "-" + dropzoneDiv.id);
+              if (!folderListItem) {
+                folderListItem = document.createElement("li");
+                folderListItem.id = folderName + "-" + dropzoneDiv.id;
+                folderListItem.innerHTML =
+                  "<strong>" + folderName + "</strong>";
+                var fileSubList = document.createElement("ul");
+                folderListItem.appendChild(fileSubList);
+                fileList.appendChild(folderListItem);
+              }
+
+
+
+              // Append file to the folder's file list
+              var fileSubList = folderListItem.querySelector("ul");
+              var fileListItem = document.createElement("li");
+              fileListItem.textContent = fileName;
+              fileSubList.appendChild(fileListItem);
+
+              this.removeFile(file);
+              return;
+            }
+
+            var folderName =
+              fullPath.length > 1 ? fullPath[fullPath.length - 2] : "Root";
+            var fileName = file.name;
+            // Check if folder already exists in the list
+            var folderListItem = document.getElementById(folderName + "-" + dropzoneDiv.id);
+            if (!folderListItem) {
+              folderListItem = document.createElement("li");
+              folderListItem.id = folderName + "-" + dropzoneDiv.id;
+              folderListItem.innerHTML =
+                "<strong>" + folderName + "</strong>";
+              var fileSubList = document.createElement("ul");
+              folderListItem.appendChild(fileSubList);
+              fileList.appendChild(folderListItem);
+            }
+
+            // Append file to the folder's file list
+            var fileSubList = folderListItem.querySelector("ul");
+            var fileListItem = document.createElement("li");
+            fileListItem.textContent = fileName;
+            fileSubList.appendChild(fileListItem);
+
+            // Remove the file immediately
+            this.removeFile(file);
+          });
+
+          this.on("successmultiple", function () {
+            console.log("Hi")
+          })
+        },
+      });
+
+      map.on("moveend zoomend", function () {
+        var nw = map.latLngToLayerPoint(layer.getBounds().getNorthWest());
+        var se = map.latLngToLayerPoint(layer.getBounds().getSouthEast());
+
+        dropzoneDiv.style.left = nw.x + "px";
+        dropzoneDiv.style.top = nw.y + "px";
+        dropzoneDiv.style.width = se.x - nw.x + "px";
+        dropzoneDiv.style.height = se.y - nw.y + "px";
+      });
+
+      var isRotating = false;
+
+      function addResizeHandler(layer) {
+        layer.on("pm:edit", function (e) {
+          if (isRotating) {
+            isRotating = false;
+            return;
+          }
+          var nw = map.latLngToLayerPoint(layer.getBounds().getNorthWest());
+          var se = map.latLngToLayerPoint(layer.getBounds().getSouthEast());
+          dropzoneDiv.style.left = nw.x + "px";
+          dropzoneDiv.style.top = nw.y + "px";
+          dropzoneDiv.style.width = se.x - nw.x + "px";
+          dropzoneDiv.style.height = se.y - nw.y + "px";
+        });
+      }
+
+      function addRotationHandler(layer) {
+        layer.on("pm:rotate", function (e) {
+          isRotating = true;
+
+          var angle = e.angle;
+          var center = map.latLngToLayerPoint(layer.getBounds().getCenter());
+
+          dropzoneDiv.style.transformOrigin = "center center";
+          dropzoneDiv.style.transform = "rotate(" + angle + "deg)";
+        });
+      }
+
+      addResizeHandler(layer);
+      addRotationHandler(layer);
+      dropzones[layer._leaflet_id] = dropzoneDiv;
+    }
+
+    // Geocoding function
+    async function geocode(location) {
+      const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(
+        location
+      )}`;
+      try {
+        const response = await fetch(url);
+        const data = await response.json();
+        if (data && data.length > 0) {
+          const lat = data[0].lat;
+          const lon = data[0].lon;
+          console.log(lat, lon)
+          map.setView([lat, lon], 13);
+
+          L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+            maxZoom: 19,
+          }).addTo(map);
+        } else {
+          console.log("No results found");
+        }
+      } catch (error) {
+        console.error("Error:", error);
+      }
+    }
+
+    // Event listener for the search button
+    document
+      .getElementById("searchButton")
+      .addEventListener("click", function () {
+        const location = document.getElementById("locationInput").value;
+        geocode(location);
+      });
+  </script>
+</body>
+
+</html>
